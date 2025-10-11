@@ -142,6 +142,13 @@ def main() -> None:
         default=None,
         help="OpenRouter X-Title 헤더",
     )
+    # Slack 옵션
+    parser.add_argument(
+        "--slack-webhook-url",
+        type=str,
+        default=os.getenv("SLACK_WEBHOOK_URL"),
+        help="Slack Incoming Webhook URL (환경변수 SLACK_WEBHOOK_URL 기본)",
+    )
 
     args = parser.parse_args()
 
@@ -167,7 +174,11 @@ def main() -> None:
 
     handler = None
     if args.translate:
-        handler = FJNewsHandler(translator=translator, target_lang=args.target_lang)
+        handler = FJNewsHandler(
+            translator=translator,
+            target_lang=args.target_lang,
+            slack_webhook_url=args.slack_webhook_url,
+        )
 
     client = FJSignalRClient(
         ftoken=args.ftoken,
@@ -176,6 +187,7 @@ def main() -> None:
         headers=headers,
         cookies=cookies,
         handler=handler,
+        slack_webhook_url=args.slack_webhook_url,
     )
 
     try:

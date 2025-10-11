@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 import requests
 import websocket
+from .slack import send_slack_message
 
 from .constants import (
     BASE_WS_HOST,
@@ -52,6 +53,7 @@ class SignalRClient:
         cookies: Dict[str, str],
         *,
         handler: Optional[Any] = None,
+        slack_webhook_url: Optional[str] = None,
     ) -> None:
         self.ftoken = ftoken
         self.connection_data_encoded = connection_data_encoded
@@ -59,6 +61,7 @@ class SignalRClient:
         self.headers = headers
         self.cookies = cookies
         self.handler = handler
+        self.slack_webhook_url = slack_webhook_url
 
         self.ws: Optional[websocket.WebSocketApp] = None
         self.connected = False
@@ -106,9 +109,11 @@ class SignalRClient:
 
     def on_error(self, ws, error) -> None:  # type: ignore[no-untyped-def]
         print("[ws error]", error)
+        send_slack_message(f"error: {error}", webhook_url=self.slack_webhook_url)
 
     def on_close(self, ws, close_status_code, close_msg) -> None:  # type: ignore[no-untyped-def]
         print("[ws close]", close_status_code, close_msg)
+        send_slack_message(f"close: {close_status_code} {close_msg}", webhook_url=self.slack_webhook_url)
         with self.lock:
             self.connected = False
 
@@ -150,7 +155,8 @@ class SignalRClient:
             r = requests.get(
                 start_url, headers=self.headers, cookies=self.cookies, timeout=10
             )
-            print("[start] status", r.status_code, "len", len(r.text))
+            print("[start] status", r.status_code, r.text)
+            send_slack_message(f"started", webhook_url=self.slack_webhook_url)
 
             while True:
                 with self.lock:

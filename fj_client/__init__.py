@@ -18,6 +18,7 @@ from .constants import (
 from .client import SignalRClient
 from .handler import NewsHubTranslatorHandler
 from . import utils as utils
+from .slack import send_slack_message
 
 __all__ = [
     "BASE_WS_HOST",
@@ -28,6 +29,7 @@ __all__ = [
     "SignalRClient",
     "NewsHubTranslatorHandler",
     "utils",
+    "send_slack_message",
 ]
 
 

@@ -5,15 +5,21 @@ import urllib.parse
 from typing import Any, Dict, Optional
 
 import requests
+from requests import Session
+from requests.adapters import HTTPAdapter
+try:
+    # requests>=2 uses urllib3 Retry
+    from urllib3.util.retry import Retry
+except Exception:  # pragma: no cover - very old environments
+    Retry = None  # type: ignore
 import websocket
 from .logger import get_logger
 
 from .constants import (
     BASE_WS_HOST,
     CONNECT_WS_TEMPLATE,
-    START_URL_TEMPLATE,
 )
-from .utils import extract_json_from_jsonp, parse_signalr_frame
+from .utils import extract_json_from_jsonp
 
 
 def do_negotiate(
@@ -22,17 +28,25 @@ def do_negotiate(
     callback: str,
     headers: Dict[str, str],
     cookies: Dict[str, str],
+    *,
+    session: Optional[Session] = None,
 ) -> Dict[str, Any]:
     ts = str(int(time.time() * 1000))
-    url = BASE_WS_HOST + "/signalr/negotiate?clientProtocol=2.1"
+    base_url = BASE_WS_HOST + "/signalr/negotiate"
+    # connection_data_encoded는 WS용으로 인코딩됨. HTTP params는 raw로 주고 인코딩을 위임한다.
+    connection_data_raw = urllib.parse.unquote(connection_data_encoded)
+    params = {
+        "clientProtocol": "2.1",
+        "connectionData": connection_data_raw,
+        "callback": callback,
+        "_": ts,
+    }
     if ftoken:
-        url += "&ftoken=" + urllib.parse.quote(ftoken, safe="")
-    url += "&connectionData=" + connection_data_encoded
-    url += "&callback=" + urllib.parse.quote(callback, safe="")
-    url += "&_=" + ts
+        params["ftoken"] = ftoken
 
-    get_logger("client").debug("[negotiate] GET %s", url)
-    resp = requests.get(url, headers=headers, cookies=cookies, timeout=10)
+    sess = session or requests
+    get_logger("client").debug("[negotiate] GET %s", base_url)
+    resp = sess.get(base_url, params=params, headers=headers, cookies=cookies, timeout=10)  # type: ignore[attr-defined]
     if resp.status_code != 200:
         raise RuntimeError(
             f"negotiate failed: {resp.status_code} {resp.text[:300]}"
@@ -74,6 +88,25 @@ class SignalRClient:
         # start 재진입 방지용 뮤텍스 (동시에 하나의 start만 실행)
         self._start_mutex = threading.Lock()
         self.log = get_logger("client")
+        self.session: Optional[Session] = self._create_session()
+
+    def _create_session(self) -> Optional[Session]:
+        try:
+            s = requests.Session()
+            if Retry is not None:
+                retry = Retry(
+                    total=3,
+                    backoff_factor=0.5,
+                    status_forcelist=(429, 500, 502, 503, 504),
+                    allowed_methods=("GET",),
+                    raise_on_status=False,
+                )
+                adapter = HTTPAdapter(max_retries=retry)
+                s.mount("https://", adapter)
+                s.mount("http://", adapter)
+            return s
+        except Exception:
+            return None
 
     def open_ws(self, connection_token: str) -> None:
         ws_url = CONNECT_WS_TEMPLATE.format(
@@ -158,6 +191,7 @@ class SignalRClient:
                     callback=self.callback,
                     headers=self.headers,
                     cookies=self.cookies,
+                    session=self.session,
                 )
                 self.last_negotiate = n
                 conn_token = n.get("ConnectionToken") or n.get("ConnectionId")
@@ -177,16 +211,25 @@ class SignalRClient:
                     return
 
                 ts = str(int(time.time() * 1000))
-                start_url = START_URL_TEMPLATE.format(
-                    ftoken=urllib.parse.quote(self.ftoken or "", safe=""),
-                    connectionToken=urllib.parse.quote(self.connection_token, safe=""),
-                    connectionData=self.connection_data_encoded,
-                    callback=urllib.parse.quote(self.callback, safe=""),
-                    ts=ts,
-                )
-                self.log.debug("[start] GET %s", start_url)
-                r = requests.get(
-                    start_url, headers=self.headers, cookies=self.cookies, timeout=10
+                # HTTP start 호출은 params로 안전하게 구성 (WS용과 달리 raw connectionData 사용)
+                connection_data_raw = urllib.parse.unquote(self.connection_data_encoded)
+                start_base = BASE_WS_HOST + "/signalr/start"
+                start_params = {
+                    "transport": "webSockets",
+                    "clientProtocol": "2.1",
+                    "ftoken": self.ftoken or "",
+                    "connectionToken": self.connection_token or "",
+                    "connectionData": connection_data_raw,
+                    "callback": self.callback,
+                    "_": ts,
+                }
+                self.log.debug("[start] GET %s", start_base)
+                r = (self.session or requests).get(  # type: ignore[attr-defined]
+                    start_base,
+                    params=start_params,
+                    headers=self.headers,
+                    cookies=self.cookies,
+                    timeout=10,
                 )
                 self.log.info("[start] status %s %s", r.status_code, r.text)
 

@@ -37,34 +37,13 @@ from fj_client import (
     SignalRClient as FJSignalRClient,
     NewsHubTranslatorHandler as FJNewsHandler,
 )
+from fj_client.utils import build_headers, load_cookies
 
 # -----------------------------
 # 상수/기본값
 # -----------------------------
 DEFAULT_CONNECTION_DATA_JSON = FJ_DEFAULT_CONNECTION_DATA_JSON
 DEFAULT_CALLBACK = FJ_DEFAULT_CALLBACK
-
-
-def _build_headers(origin: str, user_agent: str) -> Dict[str, str]:
-    return {
-        "Origin": origin,
-        "User-Agent": user_agent,
-    }
-
-
-def _load_cookies(cli_cookies: Optional[str]) -> Dict[str, str]:
-    if cli_cookies:
-        try:
-            return json.loads(cli_cookies)
-        except Exception:
-            raise SystemExit("--cookies 값은 JSON 문자열이어야 합니다.")
-    env_json = os.getenv("FINANCIALJUICE_COOKIES_JSON")
-    if env_json:
-        try:
-            return json.loads(env_json)
-        except Exception:
-            raise SystemExit("FINANCIALJUICE_COOKIES_JSON 환경변수는 JSON 문자열이어야 합니다.")
-    return {}
 
 
 def main() -> None:
@@ -183,8 +162,8 @@ def main() -> None:
         )
 
     connection_data_encoded = urllib.parse.quote(args.connection_data, safe="")
-    headers = _build_headers(origin=args.origin, user_agent=args.user_agent)
-    cookies = _load_cookies(args.cookies)
+    headers = build_headers(origin=args.origin, user_agent=args.user_agent)
+    cookies = load_cookies(args.cookies)
 
     # 로깅 초기화 (Slack 핸들러 포함)
     setup_logging(

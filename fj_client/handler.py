@@ -2,6 +2,8 @@ from typing import Any, Dict, List, Optional
 import json
 from .slack import send_slack_message
 from .logger import get_logger
+import firebase_admin  # type: ignore
+from firebase_admin import firestore  # type: ignore
 
 
 class NewsHubTranslatorHandler:
@@ -90,4 +92,62 @@ class NewsHubTranslatorHandler:
         except Exception as e:
             self.log.exception("[translate handler error] %s", e)
 
+
+
+class NewsHubFirestoreHandler:
+    """
+    NewsHub/sendUpdates 프레임에서 뉴스 항목을 추출하여 Firestore 컬렉션에 적재.
+    """
+
+    def __init__(self, *, collection: str = "news", credentials_path: str = "secret/firebase-credentials.json") -> None:
+        # firebase_admin 초기화 (이미 초기화된 경우 건너뜀)
+        if not firebase_admin._apps:  # type: ignore[attr-defined]
+            from firebase_admin import credentials  # type: ignore
+            cred = credentials.Certificate(credentials_path)
+            firebase_admin.initialize_app(cred)
+        self.db = firestore.client()
+        self.collection = collection
+        self.log = get_logger("handler.firestore")
+
+    def handle(self, frame_obj: Dict[str, Any]) -> None:
+        try:
+            msgs = frame_obj.get("M")
+            if not isinstance(msgs, list):
+                return
+            for m in msgs:
+                if not isinstance(m, dict):
+                    continue
+                hub = m.get("H") or m.get("h")
+                method = m.get("M") or m.get("m")
+                if str(hub).lower() != "newshub" or str(method) != "sendUpdates":
+                    continue
+                args = m.get("A") or m.get("a")
+                if not isinstance(args, list) or not args:
+                    continue
+                payload = args[0]
+                news_list: List[Dict[str, Any]] = []
+                if isinstance(payload, str):
+                    try:
+                        news_list = json.loads(payload)
+                    except Exception:
+                        continue
+                elif isinstance(payload, list):
+                    news_list = payload
+                else:
+                    continue
+
+                for news in news_list:
+                    if not isinstance(news, dict):
+                        continue
+                    # 외부 스키마는 그대로 보존하며 타임스탬프 필드만 추가/갱신
+                    doc = dict(news)
+                    if "createdAt" not in doc:
+                        doc["createdAt"] = firestore.SERVER_TIMESTAMP
+                    doc["updatedAt"] = firestore.SERVER_TIMESTAMP
+                    try:
+                        self.db.collection(self.collection).add(doc)
+                    except Exception as e:
+                        self.log.exception("[firestore write error] %s", e)
+        except Exception as e:
+            self.log.exception("[firestore handler error] %s", e)
 

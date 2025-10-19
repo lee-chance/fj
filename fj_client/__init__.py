@@ -16,7 +16,7 @@ from .constants import (
     DEFAULT_CALLBACK,
 )
 from .client import SignalRClient
-from .handler import NewsHubTranslatorHandler
+from .handler import NewsHubTranslatorHandler, NewsHubFirestoreHandler
 from . import utils as utils
 from .slack import send_slack_message
 
@@ -28,6 +28,7 @@ __all__ = [
     "DEFAULT_CALLBACK",
     "SignalRClient",
     "NewsHubTranslatorHandler",
+    "NewsHubFirestoreHandler",
     "utils",
     "send_slack_message",
 ]

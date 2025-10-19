@@ -29,6 +29,7 @@ import urllib.parse
 from typing import Optional, Dict
 
 from dotenv import load_dotenv
+from fj_client.logger import setup_logging, get_logger
 from ai_translator import OpenRouterTranslator as _ORT, DEFAULT_MODEL as _OR_DEFAULT_MODEL
 from fj_client import (
     DEFAULT_CONNECTION_DATA_JSON as FJ_DEFAULT_CONNECTION_DATA_JSON,
@@ -149,6 +150,30 @@ def main() -> None:
         default=os.getenv("SLACK_WEBHOOK_URL"),
         help="Slack Incoming Webhook URL (환경변수 SLACK_WEBHOOK_URL 기본)",
     )
+    # Logging 옵션
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default=os.getenv("LOG_LEVEL", "INFO"),
+        help="로그 레벨 (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
+    )
+    parser.add_argument(
+        "--json-logs",
+        action="store_true",
+        help="로그를 JSON 포맷으로 출력",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=os.getenv("LOG_FILE"),
+        help="로그 파일 경로 (지정 시 회전 파일 핸들러 활성화)",
+    )
+    parser.add_argument(
+        "--slack-log-level",
+        type=str,
+        default=os.getenv("SLACK_LOG_LEVEL", "ERROR"),
+        help="Slack로 전송할 최소 로그 레벨",
+    )
 
     args = parser.parse_args()
 
@@ -160,6 +185,16 @@ def main() -> None:
     connection_data_encoded = urllib.parse.quote(args.connection_data, safe="")
     headers = _build_headers(origin=args.origin, user_agent=args.user_agent)
     cookies = _load_cookies(args.cookies)
+
+    # 로깅 초기화 (Slack 핸들러 포함)
+    setup_logging(
+        level=args.log_level,
+        json_logs=args.json_logs,
+        log_file=args.log_file,
+        slack_webhook_url=args.slack_webhook_url,
+        slack_min_level=args.slack_log_level,
+    )
+    log = get_logger("cli")
 
     translator: Optional[_ORT] = None
     if args.translate:
@@ -193,7 +228,7 @@ def main() -> None:
     try:
         client.start()
     except KeyboardInterrupt:
-        print("Interrupted by user, stopping.")
+        log.info("Interrupted by user, stopping.")
         client.stop()
 
 

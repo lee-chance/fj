@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
+from fj_client.logger import get_logger
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -117,7 +118,7 @@ class OpenRouterTranslator:
             "response_format": response_format,
         }
 
-        print("thinking...")
+        get_logger("translator").info("thinking...")
         url = f"{self.base_url}/chat/completions"
         resp = requests.post(url, headers=self._headers(), data=json.dumps(body), timeout=60)
         if resp.status_code != 200:
@@ -125,7 +126,7 @@ class OpenRouterTranslator:
                 f"OpenRouter error: {resp.status_code} {resp.text[:500]}"
             )
         data = resp.json()
-        print(json.dumps(data, ensure_ascii=False))
+        get_logger("translator").debug(json.dumps(data, ensure_ascii=False))
         try:
             content = data["choices"][0]["message"]["content"]
             parsed = json.loads(content)

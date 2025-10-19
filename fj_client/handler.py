@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 import json
 from .slack import send_slack_message
+from .logger import get_logger
 
 
 class NewsHubTranslatorHandler:
@@ -13,6 +14,7 @@ class NewsHubTranslatorHandler:
         self.translator = translator
         self.target_lang = target_lang
         self.slack_webhook_url = slack_webhook_url
+        self.log = get_logger("handler.newshub")
 
     def handle(self, frame_obj: Dict[str, Any]) -> None:
         try:
@@ -48,25 +50,26 @@ class NewsHubTranslatorHandler:
                     description = str(news.get("Description") or "").strip()
                     if not title and not description:
                         continue
+                    # 비즈니스 알림은 명시적으로 Slack 전송 유지
                     send_slack_message(f"새 뉴스: {title}", webhook_url=self.slack_webhook_url)
                     text = title if not description else f"{title}\n\n{description}"
                     if not self.translator:
-                        print("[translate skipped] translator not configured")
+                        self.log.info("[translate skipped] translator not configured")
                         continue
                     try:
                         result = self.translator.translate(text=text, target_lang=self.target_lang)
-                        print("\n=== 번역 결과 ===")
+                        self.log.info("=== 번역 결과 ===")
                         if title:
-                            print("원문 제목:", title)
+                            self.log.info("원문 제목: %s", title)
                         if description:
                             preview = description[:500]
-                            print("원문 본문:", preview + ("..." if len(description) > 500 else ""))
-                        print("번역문:", result.get("translation", ""))
-                        print("설명:", result.get("explanation", ""))
+                            self.log.info("원문 본문: %s", preview + ("..." if len(description) > 500 else ""))
+                        self.log.info("번역문: %s", result.get("translation", ""))
+                        self.log.info("설명: %s", result.get("explanation", ""))
                         advice = result.get("advice", "")
                         if advice:
-                            print("조언:", advice)
-                        print("=================\n")
+                            self.log.info("조언: %s", advice)
+                        self.log.info("=================")
 
                         # Slack 알림 전송
                         slack_lines: List[str] = []
@@ -81,10 +84,10 @@ class NewsHubTranslatorHandler:
                             slack_text = "\n\n".join(slack_lines)
                             send_res = send_slack_message(slack_text, webhook_url=self.slack_webhook_url)
                             if not send_res.get("ok"):
-                                print("[slack error]", send_res.get("error"))
+                                self.log.error("[slack error] %s", send_res.get("error"))
                     except Exception as e:
-                        print("[translate error]", e)
+                        self.log.exception("[translate error] %s", e)
         except Exception as e:
-            print("[translate handler error]", e)
+            self.log.exception("[translate handler error] %s", e)
 
 

@@ -115,10 +115,10 @@ def setup_logging(
     console.setFormatter(formatter)
     logger.addHandler(console)
 
-    # if log_file:
     # 로그 디렉터리 자동 생성
+    log_file = log_file or f"./logs/${datetime.now().strftime('%Y-%m-%d %H:%M:%Sq')}.log"
     try:
-        directory = os.path.dirname(log_file or f"./logs/${datetime.now().strftime('%Y-%m-%d %H:%M:%Sq')}.log")
+        directory = os.path.dirname(log_file)
         if directory:
             os.makedirs(directory, exist_ok=True)
     except Exception:

@@ -3,6 +3,7 @@ import threading
 import time
 import urllib.parse
 from typing import Any, Dict, Optional
+import random
 
 import requests
 from requests import Session
@@ -20,6 +21,7 @@ from .constants import (
     CONNECT_WS_TEMPLATE,
 )
 from .utils import extract_json_from_jsonp
+from .slack import send_slack_message
 
 
 def do_negotiate(
@@ -89,6 +91,15 @@ class SignalRClient:
         self._start_mutex = threading.Lock()
         self.log = get_logger("client")
         self.session: Optional[Session] = self._create_session()
+        # 연결 상태 동기화 및 재연결 설정
+        self.connected_evt = threading.Event()
+        self.max_retries = 2
+        self.backoff_base = 1.0  # seconds
+        self.max_backoff = 30.0  # seconds
+        self._retries = 0
+        self._ws_thread: Optional[threading.Thread] = None
+        self._reconnect_lock = threading.Lock()
+        self.open_wait_timeout = 5.0
 
     def _create_session(self) -> Optional[Session]:
         try:
@@ -108,6 +119,20 @@ class SignalRClient:
         except Exception:
             return None
 
+    def _notify_slack(self, text: str, icon_emoji: Optional[str] = None) -> None:
+        if not self.slack_webhook_url:
+            return
+        try:
+            send_slack_message(
+                text=text,
+                webhook_url=self.slack_webhook_url,
+                username="FJ Bot",
+                icon_emoji=icon_emoji,
+            )
+        except Exception:
+            # 슬랙 전송 실패는 흐름에 영향 주지 않음
+            pass
+
     def open_ws(self, connection_token: str) -> None:
         ws_url = CONNECT_WS_TEMPLATE.format(
             ftoken=urllib.parse.quote(self.ftoken or "", safe=""),
@@ -116,6 +141,7 @@ class SignalRClient:
         )
         header_list = [f"{k}: {v}" for k, v in self.headers.items()]
         self.log.info("[ws] connect to %s", ws_url)
+        self.connected_evt.clear()
         self.ws = websocket.WebSocketApp(
             ws_url,
             header=header_list,
@@ -131,11 +157,18 @@ class SignalRClient:
         )
         t.daemon = True
         t.start()
+        self._ws_thread = t
 
     def on_open(self, ws) -> None:  # type: ignore[no-untyped-def]
         self.log.info("[ws] opened")
+        self.connected_evt.set()
         with self.lock:
             self.connected = True
+        # 정상 연결 시 재시도 카운터/플래그 초기화
+        self.retry_attempted = False
+        self._retries = 0
+        # Slack: 연결 성공
+        self._notify_slack("[FinancialJuice] WebSocket 연결 성공", ":satellite:")
 
     def on_message(self, ws, message: str) -> None:  # type: ignore[no-untyped-def]
         item = json.loads(message)
@@ -152,39 +185,96 @@ class SignalRClient:
 
     def on_error(self, ws, error) -> None:  # type: ignore[no-untyped-def]
         self.log.error("[ws error] %s", error)
-        # on_error 발생 시 단 1회 자동 재시도
-        if not self.retry_attempted and not self._stop:
-            self.retry_attempted = True
-            self.log.warning("[ws retry] scheduling single retry after error")
-
-            def _retry_once() -> None:
-                # 현재 연결을 정리한 뒤 짧게 대기하고 재시작 시도
-                try:
-                    if self.ws:
-                        try:
-                            self.ws.close()
-                        except Exception:
-                            pass
-                finally:
-                    time.sleep(1.5)
-                try:
-                    self.start()
-                except Exception as e:  # 방어적 로깅
-                    self.log.exception("[ws retry failed] %s", e)
-
-            t = threading.Thread(target=_retry_once)
-            t.daemon = True
-            t.start()
+        # 에러 발생 시 정책 기반 재연결 스케줄링
+        self._schedule_reconnect(reason=f"error: {error}")
 
     def on_close(self, ws, close_status_code, close_msg) -> None:  # type: ignore[no-untyped-def]
         self.log.info("[ws close] %s %s", close_status_code, close_msg)
+        self.connected_evt.clear()
         with self.lock:
             self.connected = False
+        # 정상/비정상 종료 모두 정책에 따라 재연결 시도
+        self._schedule_reconnect(reason=f"close {close_status_code} {close_msg}")
+        # Slack: 연결 끊김
+        self._notify_slack(
+            f"[FinancialJuice] WebSocket 연결 종료 code={close_status_code} msg={close_msg}",
+            ":warning:",
+        )
+
+    def _schedule_reconnect(self, reason: str) -> None:
+        if self._stop:
+            return
+        # 중복 스케줄 방지
+        if not self._reconnect_lock.acquire(blocking=False):
+            return
+
+        # 최대 재시도 횟수 확인
+        if self._retries >= self.max_retries:
+            self.log.error("[ws reconnect] give up after %d retries (%s)", self._retries, reason)
+            # Slack: 재시도 포기
+            self._notify_slack(
+                f"[FinancialJuice] WebSocket 재연결 포기 (retries={self._retries}) reason={reason}",
+                ":x:",
+            )
+            try:
+                self._reconnect_lock.release()
+            except Exception:
+                pass
+            return
+
+        # 지수 백오프 + 소폭 지터
+        base_delay = min(self.max_backoff, self.backoff_base * (2 ** self._retries))
+        jitter = random.uniform(0, 0.25 * base_delay)
+        delay = min(self.max_backoff, base_delay + jitter)
+        self._retries += 1
+        self.log.warning("[ws reconnect] in %.1fs (attempt %d/%d): %s", delay, self._retries, self.max_retries, reason)
+        # Slack: 재연결 스케줄링
+        self._notify_slack(
+            f"[FinancialJuice] WebSocket 재연결 시도 예정 in {delay:.1f}s (attempt {self._retries}/{self.max_retries}) reason={reason}",
+            ":arrows_counterclockwise:",
+        )
+
+        def _do() -> None:
+            try:
+                # 이전 연결 정리
+                try:
+                    if self.ws:
+                        self.ws.close()
+                except Exception:
+                    pass
+                time.sleep(delay)
+                if not self._stop:
+                    before = time.time()
+                    self.start()
+                    # 재연결 성공 판단: start() 이후 연결 상태 체크
+                    success = self.connected_evt.is_set()
+                    if success:
+                        self._notify_slack(
+                            f"[FinancialJuice] WebSocket 재연결 성공 (after {time.time()-before:.1f}s)",
+                            ":white_check_mark:",
+                        )
+                    else:
+                        self._notify_slack(
+                            f"[FinancialJuice] WebSocket 재연결 실패 (attempt {self._retries}/{self.max_retries})",
+                            ":x:",
+                        )
+            finally:
+                try:
+                    self._reconnect_lock.release()
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_do)
+        t.daemon = True
+        t.start()
 
     def start(self) -> None:
         # 동시에 하나의 start만 실행되도록 보장
         with self._start_mutex:
             try:
+                # 시작 시 재시도 가능 상태로 초기화
+                self.retry_attempted = False
+                self.connected_evt.clear()
                 n = do_negotiate(
                     ftoken=self.ftoken,
                     connection_data_encoded=self.connection_data_encoded,
@@ -201,13 +291,15 @@ class SignalRClient:
 
                 self.open_ws(self.connection_token)
 
-                for _ in range(10):
-                    with self.lock:
-                        if self.connected:
-                            break
-                    time.sleep(0.2)
-                if not self.connected:
-                    self.log.warning("WebSocket did not open; exiting.")
+                if not self.connected_evt.wait(timeout=self.open_wait_timeout):
+                    self.log.warning("WebSocket did not open in %.1fs; closing and exiting.", self.open_wait_timeout)
+                    try:
+                        if self.ws:
+                            self.ws.close()
+                    except Exception:
+                        pass
+                    finally:
+                        self.ws = None
                     return
 
                 ts = str(int(time.time() * 1000))
@@ -217,12 +309,13 @@ class SignalRClient:
                 start_params = {
                     "transport": "webSockets",
                     "clientProtocol": "2.1",
-                    "ftoken": self.ftoken or "",
                     "connectionToken": self.connection_token or "",
                     "connectionData": connection_data_raw,
                     "callback": self.callback,
                     "_": ts,
                 }
+                if self.ftoken:
+                    start_params["ftoken"] = self.ftoken
                 self.log.debug("[start] GET %s", start_base)
                 r = (self.session or requests).get(  # type: ignore[attr-defined]
                     start_base,
@@ -233,11 +326,23 @@ class SignalRClient:
                 )
                 self.log.info("[start] status %s %s", r.status_code, r.text)
 
+#                 self.handler.handle({
+#                     "M": [
+#                         {
+#                             "H": "newshub",
+#                             "M": "sendUpdates",
+#                             "A": ["[{\"Tags\":[],\"STID\":0,\"NewsID\":9238334,\"Title\":\"Canada Finance Minster: Tariff remission on Chinese steel is very small.\",\"TypeID\":\"0\",\"Description\":\"\",\"PostedShort\":\"15:06\",\"PostedLong\":\"20 October 2025\",\"DatePublished\":\"2025-10-20T15:06:53.22\",\"TestDatePublished\":\"\",\"Breaking\":false,\"Upd\":\"\",\"Img\":\"\",\"Level\":\"\",\"EURL\":\"https://www.financialjuice.com/News/9238334/Canada-Finance-Minster-Tariff-remission-on-Chinese-steel-is-very-small.aspx\",\"HasE\":false,\"RURL\":\"\",\"EURLImg\":\"<img src=\\\"images/rss_0.gif\\\">\",\"STRID\":0,\"RID\":0,\"FCID\":0,\"FCName\":\"\",\"FCNameURL\":null,\"StreamIDs\":[5,2],\"TickerIDs\":[9354],\"Labels\":[\"CAD\",\"Canada\",\"China\",\"Metal\"],\"IID\":\"6fb3107f-a9ed-4939-86d4-9c41e179ac2f\"}]"
+# ]
+#                         }
+#                     ]
+#                 })  # type: ignore[attr-defined]
+
                 while True:
-                    with self.lock:
-                        if not self.connected:
-                            self.log.info("connection closed; exiting.")
-                            return
+                    if self._stop:
+                        return
+                    if not self.connected_evt.is_set():
+                        self.log.info("connection closed; exiting.")
+                        return
                     time.sleep(0.5)
 
             except Exception as e:
@@ -246,10 +351,23 @@ class SignalRClient:
 
     def stop(self) -> None:
         self._stop = True
+        self.connected_evt.clear()
         if self.ws:
             try:
                 self.ws.close()
             except Exception:
                 pass
-
-
+            finally:
+                self.ws = None
+        # WS 스레드 종료 대기 (최대 2초)
+        try:
+            if self._ws_thread and self._ws_thread.is_alive():
+                self._ws_thread.join(timeout=2.0)
+        except Exception:
+            pass
+        # HTTP 세션 정리
+        try:
+            if self.session:
+                self.session.close()
+        except Exception:
+            pass

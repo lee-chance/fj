@@ -115,20 +115,20 @@ def setup_logging(
     console.setFormatter(formatter)
     logger.addHandler(console)
 
-    if log_file:
-        # 로그 디렉터리 자동 생성
-        try:
-            directory = os.path.dirname(log_file)
-            if directory:
-                os.makedirs(directory, exist_ok=True)
-        except Exception:
-            # 디렉터리 생성 실패 시에도 핸들러 생성 시도(권한 문제 등은 핸들러에서 예외 발생)
-            pass
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_file, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+    # if log_file:
+    # 로그 디렉터리 자동 생성
+    try:
+        directory = os.path.dirname(log_file or f"./logs/${datetime.now().strftime('%Y-%m-%d %H:%M:%Sq')}.log")
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+    except Exception:
+        # 디렉터리 생성 실패 시에도 핸들러 생성 시도(권한 문제 등은 핸들러에서 예외 발생)
+        pass
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
     if slack_webhook_url or slack_min_level:
         slack_handler = SlackLogHandler(

@@ -166,4 +166,8 @@ cython_debug/
 .DS_Store
 # End of https://www.toptal.com/developers/gitignore/api/python
 
+# for firebase functions
 secret/
+functions/
+firebase.json
+.firebaserc

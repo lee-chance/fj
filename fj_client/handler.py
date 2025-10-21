@@ -4,6 +4,7 @@ from .slack import send_slack_message
 from .logger import get_logger
 import firebase_admin  # type: ignore
 from firebase_admin import firestore  # type: ignore
+import hashlib, time
 
 
 class NewsHubTranslatorHandler:
@@ -53,7 +54,8 @@ class NewsHubTranslatorHandler:
                     if not title and not description:
                         continue
                     # 비즈니스 알림은 명시적으로 Slack 전송 유지
-                    send_slack_message(f"새 뉴스: {title}", webhook_url=self.slack_webhook_url)
+                    if self.slack_webhook_url:
+                        send_slack_message(f"새 뉴스: {title}", webhook_url=self.slack_webhook_url)
                     text = title if not description else f"{title}\n\n{description}"
                     if not self.translator:
                         self.log.info("[translate skipped] translator not configured")
@@ -145,7 +147,14 @@ class NewsHubFirestoreHandler:
                         doc["createdAt"] = firestore.SERVER_TIMESTAMP
                     doc["updatedAt"] = firestore.SERVER_TIMESTAMP
                     try:
-                        self.db.collection(self.collection).add(doc)
+                        ts_ms = int(time.time()*1000)
+                        news_id = str(news.get("NewsID") or "").strip()
+                        # published_at = str(news.get("DatePublished") or "").strip()
+                        # title = str(news.get("Title") or "").strip()
+                        # content_key = f"{news_id}-{published_at}-{title}".encode("utf-8")
+                        # suffix = hashlib.sha1(content_key).hexdigest()[:12]
+                        doc_id = f"{ts_ms}-{news_id}"
+                        self.db.collection(self.collection).document(doc_id).set(doc)
                     except Exception as e:
                         self.log.exception("[firestore write error] %s", e)
         except Exception as e:

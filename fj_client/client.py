@@ -245,9 +245,10 @@ class SignalRClient:
                 time.sleep(delay)
                 if not self._stop:
                     before = time.time()
-                    self.start()
-                    # 재연결 성공 판단: start() 이후 연결 상태 체크
-                    success = self.connected_evt.is_set()
+                    # start()를 백그라운드에서 실행하여 비블로킹 성공 판정
+                    threading.Thread(target=self.start, daemon=True).start()
+                    # 오픈 대기시간 + 소폭 여유로 성공 여부 판정
+                    success = self.connected_evt.wait(timeout=self.open_wait_timeout + 1.0)
                     if success:
                         self._notify_slack(
                             f"[FinancialJuice] WebSocket 재연결 성공 (after {time.time()-before:.1f}s)",
